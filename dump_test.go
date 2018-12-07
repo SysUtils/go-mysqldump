@@ -1,7 +1,6 @@
 package mysqldump
 
 import (
-	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
@@ -114,7 +113,7 @@ func TestCreateTableSQLOk(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"Table", "Create Table"}).
 		AddRow("Test_Table", "CREATE TABLE 'Test_Table' (`id` int(11) NOT NULL AUTO_INCREMENT,`s` char(60) DEFAULT NULL, PRIMARY KEY (`id`))ENGINE=InnoDB DEFAULT CHARSET=latin1")
 
-	mock.ExpectQuery("^SHOW CREATE TABLE Test_Table$").WillReturnRows(rows)
+	mock.ExpectQuery("^SHOW CREATE TABLE `Test_Table`$").WillReturnRows(rows)
 
 	result, err := createTableSQL(db, "Test_Table")
 
@@ -146,7 +145,7 @@ func TestCreateTableValuesOk(t *testing.T) {
 		AddRow(1, "test@test.de", "Test Name 1").
 		AddRow(2, "test2@test.de", "Test Name 2")
 
-	mock.ExpectQuery("^SELECT (.+) FROM test$").WillReturnRows(rows)
+	mock.ExpectQuery("^SELECT (.+) FROM `test`$").WillReturnRows(rows)
 
 	result, err := createTableValues(db, "test")
 	if err != nil {
@@ -158,7 +157,7 @@ func TestCreateTableValuesOk(t *testing.T) {
 		t.Errorf("there were unfulfilled expections: %s", err)
 	}
 
-	expectedResult := "('1','test@test.de','Test Name 1'),('2','test2@test.de','Test Name 2')"
+	expectedResult := []string{"('1','test@test.de','Test Name 1'),('2','test2@test.de','Test Name 2')"}
 
 	if !reflect.DeepEqual(result, expectedResult) {
 		t.Fatalf("expected %#v, got %#v", expectedResult, result)
@@ -178,7 +177,7 @@ func TestCreateTableValuesNil(t *testing.T) {
 		AddRow(2, "test2@test.de", "Test Name 2").
 		AddRow(3, "", "Test Name 3")
 
-	mock.ExpectQuery("^SELECT (.+) FROM test$").WillReturnRows(rows)
+	mock.ExpectQuery("^SELECT (.+) FROM `test`$").WillReturnRows(rows)
 
 	result, err := createTableValues(db, "test")
 	if err != nil {
@@ -190,7 +189,7 @@ func TestCreateTableValuesNil(t *testing.T) {
 		t.Errorf("there were unfulfilled expections: %s", err)
 	}
 
-	expectedResult := "('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2'),('3','','Test Name 3')"
+	expectedResult := []string{"('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2'),('3','','Test Name 3')"}
 
 	if !reflect.DeepEqual(result, expectedResult) {
 		t.Fatalf("expected %#v, got %#v", expectedResult, result)
@@ -212,8 +211,8 @@ func TestCreateTableOk(t *testing.T) {
 		AddRow(1, nil, "Test Name 1").
 		AddRow(2, "test2@test.de", "Test Name 2")
 
-	mock.ExpectQuery("^SHOW CREATE TABLE Test_Table$").WillReturnRows(createTableRows)
-	mock.ExpectQuery("^SELECT (.+) FROM Test_Table$").WillReturnRows(createTableValueRows)
+	mock.ExpectQuery("^SHOW CREATE TABLE `Test_Table`$").WillReturnRows(createTableRows)
+	mock.ExpectQuery("^SELECT (.+) FROM `Test_Table`$").WillReturnRows(createTableValueRows)
 
 	result, err := createTable(db, "Test_Table")
 	if err != nil {
@@ -228,7 +227,7 @@ func TestCreateTableOk(t *testing.T) {
 	expectedResult := &table{
 		Name:   "Test_Table",
 		SQL:    "CREATE TABLE 'Test_Table' (`id` int(11) NOT NULL AUTO_INCREMENT,`s` char(60) DEFAULT NULL, PRIMARY KEY (`id`))ENGINE=InnoDB DEFAULT CHARSET=latin1",
-		Values: "('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2')",
+		Values: []string{"('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2')"},
 	}
 
 	if !reflect.DeepEqual(result, expectedResult) {
@@ -254,6 +253,9 @@ func TestDumpOk(t *testing.T) {
 	serverVersionRows := sqlmock.NewRows([]string{"Version()"}).
 		AddRow("test_version")
 
+	createDatabaseRows := sqlmock.NewRows([]string{"Database", "Create Database"}).
+		AddRow("test_database", "CREATE DATABASE `test_database` /*!40100 DEFAULT CHARACTER SET latin1 */")
+
 	createTableRows := sqlmock.NewRows([]string{"Table", "Create Table"}).
 		AddRow("Test_Table", "CREATE TABLE 'Test_Table' (`id` int(11) NOT NULL AUTO_INCREMENT,`email` char(60) DEFAULT NULL, `name` char(60), PRIMARY KEY (`id`))ENGINE=InnoDB DEFAULT CHARSET=latin1")
 
@@ -262,33 +264,18 @@ func TestDumpOk(t *testing.T) {
 		AddRow(2, "test2@test.de", "Test Name 2")
 
 	mock.ExpectQuery("^SELECT version()").WillReturnRows(serverVersionRows)
+	mock.ExpectQuery("^SHOW CREATE DATABASE `test_database`$").WillReturnRows(createDatabaseRows)
 	mock.ExpectQuery("^SHOW TABLES$").WillReturnRows(showTablesRows)
-	mock.ExpectQuery("^SHOW CREATE TABLE Test_Table$").WillReturnRows(createTableRows)
-	mock.ExpectQuery("^SELECT (.+) FROM Test_Table$").WillReturnRows(createTableValueRows)
+	mock.ExpectQuery("^SHOW CREATE TABLE `Test_Table`$").WillReturnRows(createTableRows)
+	mock.ExpectQuery("^SELECT (.+) FROM `Test_Table`$").WillReturnRows(createTableValueRows)
 
-	dumper := &Dumper{
-		db:     db,
-		format: "test_format",
-		dir:    "/tmp/",
-	}
-
-	path, err := dumper.Dump()
-
-	if path == "" {
-		t.Errorf("No empty path was expected while dumping the database")
-	}
+	dump, err := Dump(db, "test_database")
 
 	if err != nil {
 		t.Errorf("error was not expected while dumping the database: %s", err)
 	}
 
-	f, err := ioutil.ReadFile("/tmp/test_format.sql")
-
-	if err != nil {
-		t.Errorf("error was not expected while reading the file: %s", err)
-	}
-
-	result := strings.Replace(strings.Split(string(f), "-- Dump completed")[0], "`", "\\", -1)
+	result := strings.Replace(strings.Split(dump, "-- Dump completed")[0], "`", "\\", -1)
 
 	expected := `-- Go SQL Dump ` + version + `
 --
@@ -307,26 +294,37 @@ func TestDumpOk(t *testing.T) {
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
 
+DROP DATABASE IF EXISTS \test_database\;
+
+CREATE DATABASE \test_database\ /*!40100 DEFAULT CHARACTER SET latin1 */;
+
+USE \test_database\;
+
 
 --
--- Table structure for table Test_Table
+-- Table structure for table \Test_Table\
 --
 
-DROP TABLE IF EXISTS Test_Table;
+DROP TABLE IF EXISTS \Test_Table\;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8 */;
 CREATE TABLE 'Test_Table' (\id\ int(11) NOT NULL AUTO_INCREMENT,\email\ char(60) DEFAULT NULL, \name\ char(60), PRIMARY KEY (\id\))ENGINE=InnoDB DEFAULT CHARSET=latin1;
 /*!40101 SET character_set_client = @saved_cs_client */;
 --
--- Dumping data for table Test_Table
+-- Dumping data for table \Test_Table\
 --
 
-LOCK TABLES Test_Table WRITE;
-/*!40000 ALTER TABLE Test_Table DISABLE KEYS */;
+LOCK TABLES \Test_Table\ WRITE;
+/*!40000 ALTER TABLE \Test_Table\ DISABLE KEYS */;
 
-INSERT INTO Test_Table VALUES ('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2');
 
-/*!40000 ALTER TABLE Test_Table ENABLE KEYS */;
+
+
+INSERT INTO \Test_Table\ VALUES ('1',null,'Test Name 1'),('2','test2@test.de','Test Name 2');
+
+
+
+/*!40000 ALTER TABLE \Test_Table\ ENABLE KEYS */;
 UNLOCK TABLES;
 
 `

@@ -3,29 +3,33 @@ package mysqldump
 import (
 	"database/sql"
 	"errors"
-	"os"
-	"path"
 	"strings"
 	"text/template"
 	"time"
+	"fmt"
+	"bytes"
 )
 
 type table struct {
 	Name   string
 	SQL    string
-	Values string
+	Values []string
 }
 
 type dump struct {
 	DumpVersion   string
 	ServerVersion string
+	DBName        string
+	DBSQL         string
 	Tables        []*table
 	CompleteTime  string
 }
 
 const version = "0.2.2"
 
-const tmpl = `-- Go SQL Dump {{ .DumpVersion }}
+
+func getTemplate() (string) {
+	rawtemplate := `-- Go SQL Dump {{ .DumpVersion }}
 --
 -- ------------------------------------------------------
 -- Server version	{{ .ServerVersion }}
@@ -41,6 +45,12 @@ const tmpl = `-- Go SQL Dump {{ .DumpVersion }}
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
+
+DROP DATABASE IF EXISTS {{ .DBName }};
+
+{{ .DBSQL }};
+
+USE {{ .DBName }};
 
 {{range .Tables}}
 --
@@ -58,72 +68,78 @@ DROP TABLE IF EXISTS {{ .Name }};
 
 LOCK TABLES {{ .Name }} WRITE;
 /*!40000 ALTER TABLE {{ .Name }} DISABLE KEYS */;
-{{ if .Values }}
-INSERT INTO {{ .Name }} VALUES {{ .Values }};
+
+{{$name := .Name}}
+{{range .Values}}
+{{ if . }}
+INSERT INTO {{ $name }} VALUES {{ . }};
 {{ end }}
+{{ end }}
+
 /*!40000 ALTER TABLE {{ .Name }} ENABLE KEYS */;
 UNLOCK TABLES;
 {{ end }}
--- Dump completed on {{ .CompleteTime }}
-`
+-- Dump completed on {{ .CompleteTime }}`
+	rawtemplate = strings.Replace(rawtemplate, "{{ .DBName }}", "`{{ .DBName }}`", -1)
+	rawtemplate = strings.Replace(rawtemplate, "{{ $name }}", "`{{ $name }}`", -1)
+	return strings.Replace(rawtemplate, "{{ .Name }}", "`{{ .Name }}`", -1)
+}
 
 // Creates a MYSQL Dump based on the options supplied through the dumper.
-func (d *Dumper) Dump() (string, error) {
-	name := time.Now().Format(d.format)
-	p := path.Join(d.dir, name+".sql")
+func Dump(db *sql.DB, dbname string) (string, error) {
+	p := ""
+	var err error
 
-	// Check dump directory
-	if e, _ := exists(p); e {
-		return p, errors.New("Dump '" + name + "' already exists.")
-	}
 
-	// Create .sql file
-	f, err := os.Create(p)
-
+	// Get server version
+	serverVersion, err := getServerVersion(db)
 	if err != nil {
 		return p, err
 	}
 
-	defer f.Close()
-
-	data := dump{
-		DumpVersion: version,
-		Tables:      make([]*table, 0),
-	}
-
-	// Get server version
-	if data.ServerVersion, err = getServerVersion(d.db); err != nil {
+	// Get sql for create DB
+	dbsql, err := createDatabaseSQL(db, dbname)
+	if err != nil {
 		return p, err
 	}
 
 	// Get tables
-	tables, err := getTables(d.db)
+	tables, err := getTables(db)
 	if err != nil {
 		return p, err
 	}
 
 	// Get sql for each table
+	tablelist := make([]*table,0)
 	for _, name := range tables {
-		if t, err := createTable(d.db, name); err == nil {
-			data.Tables = append(data.Tables, t)
+		if t, err := createTable(db, name); err == nil {
+			tablelist = append(tablelist, t)
 		} else {
 			return p, err
 		}
 	}
 
 	// Set complete time
-	data.CompleteTime = time.Now().String()
+	data := dump{
+		DumpVersion:  version,
+		Tables:       tablelist,
+		DBName:       dbname,
+		DBSQL:        dbsql,
+		CompleteTime: time.Now().String(),
+		ServerVersion:serverVersion,
+	}
 
-	// Write dump to file
-	t, err := template.New("mysqldump").Parse(tmpl)
+	// Write dump to buffer
+	var tpl bytes.Buffer
+	t, err := template.New("mysqldump").Parse(getTemplate())
 	if err != nil {
 		return p, err
 	}
-	if err = t.Execute(f, data); err != nil {
+	if err = t.Execute(&tpl, data); err != nil {
 		return p, err
 	}
 
-	return p, nil
+	return tpl.String(), nil
 }
 
 func getTables(db *sql.DB) ([]string, error) {
@@ -170,11 +186,27 @@ func createTable(db *sql.DB, name string) (*table, error) {
 	return t, nil
 }
 
+func createDatabaseSQL(db *sql.DB, name string) (string, error) {
+	// Get table creation SQL
+	var database_return sql.NullString
+	var database_sql sql.NullString
+	err := db.QueryRow(fmt.Sprintf("SHOW CREATE DATABASE `%s`", name)).Scan(&database_return, &database_sql)
+
+	if err != nil {
+		return "", err
+	}
+	if database_return.String != name {
+		return "", errors.New("Returned database is not the same as requested table")
+	}
+
+	return database_sql.String, nil
+}
+
 func createTableSQL(db *sql.DB, name string) (string, error) {
 	// Get table creation SQL
 	var table_return sql.NullString
 	var table_sql sql.NullString
-	err := db.QueryRow("SHOW CREATE TABLE "+name).Scan(&table_return, &table_sql)
+	err := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`", name)).Scan(&table_return, &table_sql)
 
 	if err != nil {
 		return "", err
@@ -186,25 +218,27 @@ func createTableSQL(db *sql.DB, name string) (string, error) {
 	return table_sql.String, nil
 }
 
-func createTableValues(db *sql.DB, name string) (string, error) {
+
+func createTableValues(db *sql.DB, name string) ([]string, error) {
 	// Get Data
-	rows, err := db.Query("SELECT * FROM " + name)
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM `%s`", name))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer rows.Close()
 
 	// Get columns
 	columns, err := rows.Columns()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(columns) == 0 {
-		return "", errors.New("No columns in table " + name + ".")
+		return nil, errors.New("No columns in table " + name + ".")
 	}
 
 	// Read data
 	data_text := make([]string, 0)
+
 	for rows.Next() {
 		// Init temp data storage
 
@@ -219,7 +253,7 @@ func createTableValues(db *sql.DB, name string) (string, error) {
 
 		// Read data
 		if err := rows.Scan(ptrs...); err != nil {
-			return "", err
+			return nil, err
 		}
 
 		dataStrings := make([]string, len(columns))
@@ -235,5 +269,13 @@ func createTableValues(db *sql.DB, name string) (string, error) {
 		data_text = append(data_text, "("+strings.Join(dataStrings, ",")+")")
 	}
 
-	return strings.Join(data_text, ","), rows.Err()
+
+	var batches []string
+	batchSize := 1000
+	for batchSize < len(data_text) {
+		data_text, batches = data_text[batchSize:], append(batches, strings.Join(data_text[0:batchSize:batchSize], ","))
+	}
+	batches = append(batches, strings.Join(data_text, ","))
+
+	return batches, rows.Err()
 }
