@@ -68,13 +68,9 @@ DROP TABLE IF EXISTS {{ .Name }};
 
 LOCK TABLES {{ .Name }} WRITE;
 /*!40000 ALTER TABLE {{ .Name }} DISABLE KEYS */;
-
 {{$name := .Name}}
-{{range .Values}}
-{{ if . }}
-INSERT INTO {{ $name }} VALUES {{ . }};
-{{ end }}
-{{ end }}
+{{range .Values}}{{ if . }}INSERT INTO {{ $name }} VALUES {{ . }};
+{{ end }}{{ end }}
 
 /*!40000 ALTER TABLE {{ .Name }} ENABLE KEYS */;
 UNLOCK TABLES;
